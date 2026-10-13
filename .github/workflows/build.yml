@@ -18,8 +18,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. فك ضغط الـ ZIP وإصلاح نقص اللون Emerald300 في Color.kt تلقائياً
-      - name: Extract ZIP & Fix Missing Color Reference
+      # 2. فك ضغط الـ ZIP وإصلاح إعدادات الكود والذاكرة
+      - name: Extract ZIP & Prepare Project
         run: |
           if [ ! -f "app/build.gradle.kts" ]; then
             ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
@@ -31,22 +31,27 @@ jobs:
           # إنشاء ملف .env
           cp .env.example .env 2>/dev/null || echo "GEMINI_API_KEY=DUMMY_KEY" > .env
 
-          # إضافة اللون الناقص Emerald300 (ودرجة Emerald400 احتياطياً) إلى ملف Color.kt
+          # إضافة اللون الناقص Emerald300 في ملف Color.kt
           if ! grep -q "val Emerald300" app/src/main/java/com/example/ui/theme/Color.kt; then
-            cat << 'EOF' >> app/src/main/java/com/example/ui/theme/Color.kt
-
-          val Emerald400 = Color(0xFF34D399)
-          val Emerald300 = Color(0xFF6EE7B7)
-          EOF
+            printf "\nval Emerald400 = Color(0xFF34D399)\nval Emerald300 = Color(0xFF6EE7B7)\n" >> app/src/main/java/com/example/ui/theme/Color.kt
           fi
 
-          # حذف ملف baseline-prof.txt اليدوي لتجنب أخطاء التجميع
+          # حذف ملف baseline-prof.txt اليدوي
           rm -f app/src/main/baseline-prof.txt
 
-          # ضبط إعدادات الذاكرة لـ Gradle
-          printf "org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -Dfile.encoding=UTF-8\norg.gradle.parallel=true\nkotlin.code.style=official\nandroid.nonTransitiveRClass=true\norg.gradle.caching=true\norg.gradle.configuration-cache=false\ngoogleServices.missing.passthrough=true\n" > gradle.properties
+          # تعطيل التوازي (parallel=false & workers.max=1) لمنع تعارض KSP
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -Dfile.encoding=UTF-8
+          org.gradle.parallel=false
+          org.gradle.workers.max=1
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          org.gradle.caching=true
+          org.gradle.configuration-cache=false
+          googleServices.missing.passthrough=true
+          EOF
 
-          # تعطيل R8 أثناء البناء السحابي لضمان سرعة واستقرار التجميع
+          # تعطيل تصغير الكود لتسريع وضمان البناء
           sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/g' app/build.gradle.kts
           sed -i 's/isShrinkResources = true/isShrinkResources = false/g' app/build.gradle.kts
 
@@ -62,7 +67,7 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      # 5. توليد مفاتيح التوقيع الرقمي (Release & Debug)
+      # 5. توليد مفاتيح التوقيع الرقمي
       - name: Generate Signing Keystores
         run: |
           rm -f my-upload-key.jks debug.keystore
@@ -92,18 +97,22 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      # 7. بناء الـ APK مع حفظ سجل البناء الكامل
-      - name: Build Signed APKs
+      # 7. بناء نسخة Debug أولاً بشكل منفرد (لمنع تعارض KSP)
+      - name: Build Debug APK
         run: |
-          gradle assembleDebug assembleRelease -x lint -x lintVitalRelease -x lintVitalAnalyzeRelease --no-daemon --stacktrace 2>&1 | tee build_log.txt
+          gradle :app:assembleDebug -x lint --max-workers=1 --no-daemon --stacktrace
 
-      # 8. رفع ملفات الـ APK الجاهزة للتحميل (مع سجل البناء)
+      # 8. بناء نسخة Release بشكل منفرد
+      - name: Build Release APK
+        run: |
+          gradle :app:assembleRelease -x lint -x lintVitalRelease -x lintVitalAnalyzeRelease --max-workers=1 --no-daemon --stacktrace
+
+      # 9. رفع ملفات الـ APK الجاهزة للتحميل
       - name: Upload APKs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: MosqueManager-APK
           path: |
-            app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
-            build_log.txt
+            app/build/outputs/apk/release/*.apk
